@@ -1,11 +1,12 @@
-FROM golang:1.13-alpine3.10 AS golang
+FROM golang:1.22.6-alpine3.20 AS golang
 WORKDIR /src
 RUN apk --no-cache add build-base git \
-    && GO111MODULE=off go get github.com/mjibson/esc
+    && GO111MODULE=on go install github.com/mjibson/esc@latest
 COPY . ./
-RUN go generate && go build
 
-FROM alpine:3.10
+RUN go get -u && go generate && go build
+
+FROM alpine:3.20
 ENTRYPOINT ["/usr/local/bin/raftman"]
 RUN mkdir -p /var/lib/raftman
 COPY --from=golang /src/raftman /usr/local/bin/raftman
