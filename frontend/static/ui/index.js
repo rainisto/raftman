@@ -43,7 +43,13 @@ webix.ready(function () {
                             {id: "Timestamp", header: "Timestamp", width: 175, format: tsFormatter},
                             {id: "Hostname", header: "Hostname", width: 150},
                             {id: "Application", header: "Application", width: 150},
-                            {id: "Message", header: "Message", fillspace: true}
+                            {id: "Message", header: "Message", fillspace: true,
+                            template: function(obj) {
+                                var msg = obj.Message || "";
+                                var safeTitle = msg.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+                                return "<div title='" + safeTitle + "'>" + safeTitle + "</div>";
+                            }
+                        }
                         ],
                         data: []
                     }
