@@ -236,11 +236,15 @@ func (b *sqliteBackend) buildQueryFromAndWhere(req *api.QueryRequest, sqlBuf *by
 	fmt.Fprint(sqlBuf, "FROM logh AS h JOIN logb AS b ON b.docid = h.rowid ")
 	fmt.Fprint(sqlBuf, "WHERE 1=1 ")
 	if !req.FromTimestamp.IsZero() {
-		fmt.Fprint(sqlBuf, "AND h.ts >= ? ")
+		// Truncate to the start of the minute to handle UI datepicker sending partial seconds
+		req.FromTimestamp = req.FromTimestamp.Truncate(time.Minute)
+		fmt.Fprint(sqlBuf, "AND datetime(h.ts) >= datetime(?) ")
 		*args = append(*args, req.FromTimestamp)
 	}
 	if !req.ToTimestamp.IsZero() {
-		fmt.Fprint(sqlBuf, "AND h.ts < ? ")
+		// Truncate to the end of the minute (start + 59.999 seconds)
+		req.ToTimestamp = req.ToTimestamp.Truncate(time.Minute).Add(time.Minute - time.Nanosecond)
+		fmt.Fprint(sqlBuf, "AND datetime(h.ts) <= datetime(?) ")
 		*args = append(*args, req.ToTimestamp)
 	}
 	if req.Hostname != "" {
