@@ -1,4 +1,4 @@
-FROM golang:1.24.11-alpine3.23 AS golang
+FROM golang:1.26.0-alpine3.23 AS golang
 WORKDIR /src
 RUN apk --no-cache add build-base git \
     && GO111MODULE=on go install github.com/mjibson/esc@latest
