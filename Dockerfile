@@ -10,3 +10,4 @@ FROM alpine:3.23
 ENTRYPOINT ["/usr/local/bin/raftman"]
 RUN mkdir -p /var/lib/raftman
 COPY --from=golang /src/raftman /usr/local/bin/raftman
+RUN apk upgrade -U
