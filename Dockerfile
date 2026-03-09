@@ -1,4 +1,4 @@
-FROM golang:1.26.0-alpine3.23 AS golang
+FROM golang:1.26.1-alpine3.23 AS golang
 WORKDIR /src
 RUN apk --no-cache add build-base git \
     && GO111MODULE=on go install github.com/mjibson/esc@latest
@@ -10,4 +10,4 @@ FROM alpine:3.23
 ENTRYPOINT ["/usr/local/bin/raftman"]
 RUN mkdir -p /var/lib/raftman
 COPY --from=golang /src/raftman /usr/local/bin/raftman
-RUN apk upgrade -U
+RUN apk update && apk upgrade --no-cache && apk add --upgrade zlib
