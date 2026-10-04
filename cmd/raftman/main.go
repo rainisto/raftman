@@ -10,8 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/pierredavidbelanger/raftman/internal/store"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -57,7 +55,7 @@ func main() {
 // blocks until SIGINT or SIGTERM, then shuts down in reverse order so that
 // entries still in flight are written before the database closes.
 func run(backendURL *url.URL, frontendURLs []*url.URL) error {
-	cfg, err := storeConfig(backendURL)
+	openStore, err := configureBackend(backendURL)
 	if err != nil {
 		return fmt.Errorf("Unable to create backend '%s': %s", backendURL, err)
 	}
@@ -71,7 +69,7 @@ func run(backendURL *url.URL, frontendURLs []*url.URL) error {
 	}
 
 	log.Printf("Start backend '%s'", backendURL)
-	st, err := store.Open(cfg)
+	st, err := openStore()
 	if err != nil {
 		return fmt.Errorf("Unable to start backend '%s': %s", backendURL, err)
 	}

@@ -10,9 +10,49 @@ import (
 	syslog "gopkg.in/mcuadros/go-syslog.v2"
 	"gopkg.in/mcuadros/go-syslog.v2/format"
 
+	"github.com/pierredavidbelanger/raftman/internal/pgstore"
 	"github.com/pierredavidbelanger/raftman/internal/server"
 	"github.com/pierredavidbelanger/raftman/internal/store"
 )
+
+// backend is a server.Store that can also be closed.
+type backend interface {
+	server.Store
+	Close() error
+}
+
+// configureBackend validates the backend URL and returns a function that opens
+// the store, so configuration errors surface before any frontend is parsed.
+func configureBackend(u *url.URL) (func() (backend, error), error) {
+	switch u.Scheme {
+	case "sqlite":
+		cfg, err := storeConfig(u)
+		if err != nil {
+			return nil, err
+		}
+		return func() (backend, error) {
+			s, err := store.Open(cfg)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		}, nil
+	case "postgres", "postgresql":
+		cfg, err := pgStoreConfig(u)
+		if err != nil {
+			return nil, err
+		}
+		return func() (backend, error) {
+			s, err := pgstore.Open(cfg)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		}, nil
+	default:
+		return nil, fmt.Errorf("Invalid backend %s", u.Scheme)
+	}
+}
 
 // storeConfig parses sqlite://<path>?insertQueueSize=&queryQueueSize=&timeout=&batchSize=&retention=
 func storeConfig(u *url.URL) (store.Config, error) {
@@ -42,6 +82,40 @@ func storeConfig(u *url.URL) (store.Config, error) {
 			return cfg, err
 		}
 	}
+	return cfg, nil
+}
+
+// pgStoreConfig parses postgres://user:pass@host:port/db?sslmode=&insertQueueSize=&queryQueueSize=&timeout=&batchSize=&retention=
+func pgStoreConfig(u *url.URL) (pgstore.Config, error) {
+	cfg := pgstore.Config{}
+	var err error
+	if cfg.InsertQueueSize, err = intParam(u, "insertQueueSize", 512); err != nil {
+		return cfg, err
+	}
+	if cfg.QueryQueueSize, err = intParam(u, "queryQueueSize", 16); err != nil {
+		return cfg, err
+	}
+	if cfg.Timeout, err = durationParam(u, "timeout", 5*time.Second); err != nil {
+		return cfg, err
+	}
+	if cfg.BatchSize, err = intParam(u, "batchSize", 32); err != nil {
+		return cfg, err
+	}
+	cfg.Retention = store.Infinite
+	if s := u.Query().Get("retention"); s != "" {
+		if cfg.Retention, err = store.ParseRetention(s); err != nil {
+			return cfg, err
+		}
+	}
+	// Build the DSN from the URL minus raftman's own params; libpq params
+	// (sslmode, connect_timeout, ...) are left in place.
+	dsn := *u
+	q := dsn.Query()
+	for _, k := range []string{"insertQueueSize", "queryQueueSize", "timeout", "batchSize", "retention"} {
+		q.Del(k)
+	}
+	dsn.RawQuery = q.Encode()
+	cfg.DSN = dsn.String()
 	return cfg, nil
 }
 
