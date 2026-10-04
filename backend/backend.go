@@ -10,6 +10,8 @@ func NewBackend(e spi.LogEngine, backendURL *url.URL) (spi.LogBackend, error) {
 	switch backendURL.Scheme {
 	case "sqlite":
 		return newSQLiteBackend(backendURL)
+	case "postgres", "postgresql":
+		return newPostgresBackend(backendURL)
 	}
 	return nil, fmt.Errorf("Invalid backend %s", backendURL.Scheme)
 }

@@ -80,3 +80,64 @@ raftman \
     -frontend api+http://:8181/api/ \
     -frontend ui+http://:8282/
 ```
+
+### backends
+
+raftman can store logs in either an embedded SQLite database (default, no
+external dependency) or in an external PostgreSQL server. PostgreSQL is
+recommended for large log volumes, where SQLite query latency can become a
+bottleneck:
+
+```
+# SQLite (default)
+raftman sqlite:///var/lib/raftman/logs.db?retention=30d
+
+# PostgreSQL
+raftman "postgres://user:pass@host:5432/dbname?sslmode=disable&retention=30d"
+```
+
+The JSON API, syslog frontends and Web UI are identical for both backends.
+The only user-visible difference is the full text search (`Message`) query
+syntax: the SQLite backend uses SQLite FTS4 `MATCH` syntax, while the
+PostgreSQL backend uses `websearch_to_tsquery` syntax.
+
+The same `retention`, `batchSize`, `insertQueueSize`, `queryQueueSize` and
+`timeout` query parameters are supported by both backends.
+
+### docker-compose with PostgreSQL
+
+```yaml
+services:
+  raftman:
+    image: pierredavidbelanger/raftman
+    restart: unless-stopped
+    # Exec/list form so the "&" in the URL is passed verbatim (not treated as a
+    # shell background operator).
+    entrypoint:
+      - /usr/local/bin/raftman
+      - "postgres://raftman:${RAFTMAN_DB_PASSWORD:-raftman}@raftman-db:5432/raftman?sslmode=disable&retention=30d"
+    depends_on:
+      - raftman-db
+    ports:
+      - "514:514/udp"
+      - "5514:5514"
+      - "8181:8181"
+      - "8282:8282"
+
+  raftman-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=raftman
+      - POSTGRES_PASSWORD=${RAFTMAN_DB_PASSWORD:-raftman}
+      - POSTGRES_DB=raftman
+    volumes:
+      - raftman-pgdata:/var/lib/postgresql/data
+
+volumes:
+  raftman-pgdata:
+```
+
+To use SQLite instead, drop the `raftman-db` service and the `depends_on`, and
+set the entrypoint back to `sqlite:///var/lib/raftman/logs.db?retention=30d`.
+
