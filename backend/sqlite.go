@@ -65,10 +65,16 @@ func (b *sqliteBackend) Start() error {
 		return err
 	}
 
-	db, err := sql.Open("sqlite3", b.dbFilePath)
+	// WAL lets reads run concurrently with the single writer goroutine, so a slow
+	// query no longer blocks inserts; busy_timeout absorbs checkpoint contention.
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL", b.dbFilePath)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return err
 	}
+	// Multiple pooled connections allow parallel readers under WAL.
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	b.db = db
 
 	_, err = db.Exec("CREATE TABLE IF NOT EXISTS logh (ts DATETIME, host VARCHAR(255), app VARCHAR(255))")
@@ -146,11 +152,25 @@ func (b *sqliteBackend) Insert(req *api.InsertRequest) (*api.InsertResponse, err
 }
 
 func (b *sqliteBackend) QueryStat(req *api.QueryRequest) (*api.QueryStatResponse, error) {
-	return newQueryStatM(req).push(b.queryStatQ).pollWithTimeout(b.timeout)
+	resCh := make(chan *api.QueryStatResponse, 1)
+	go func() { resCh <- b.doQueryStat(req) }()
+	select {
+	case v := <-resCh:
+		return v, nil
+	case <-time.After(b.timeout):
+		return nil, fmt.Errorf("operation timed out after %s", b.timeout)
+	}
 }
 
 func (b *sqliteBackend) QueryList(req *api.QueryRequest) (*api.QueryListResponse, error) {
-	return newQueryListM(req).push(b.queryListQ).pollWithTimeout(b.timeout)
+	resCh := make(chan *api.QueryListResponse, 1)
+	go func() { resCh <- b.doQueryList(req) }()
+	select {
+	case v := <-resCh:
+		return v, nil
+	case <-time.After(b.timeout):
+		return nil, fmt.Errorf("operation timed out after %s", b.timeout)
+	}
 }
 
 func (b *sqliteBackend) run() {
@@ -159,10 +179,6 @@ func (b *sqliteBackend) run() {
 		select {
 		case e := <-b.insertQ:
 			b.handleInsert(e)
-		case m := <-b.queryStatQ:
-			b.handleQueryStat(m)
-		case m := <-b.queryListQ:
-			b.handleQueryList(m)
 		case now := <-retentionTicker.C:
 			b.handleRetention(now)
 		case cond := <-b.stopQ:
@@ -223,7 +239,7 @@ func (b *sqliteBackend) handleInsertBatch(tx *sql.Tx, e *api.LogEntry) error {
 }
 
 func (b *sqliteBackend) insertEntry(tx *sql.Tx, e *api.LogEntry) error {
-	if _, err := tx.Stmt(b.hStmt).Exec(e.Timestamp, e.Hostname, e.Application); err != nil {
+	if _, err := tx.Stmt(b.hStmt).Exec(formatTS(e.Timestamp), e.Hostname, e.Application); err != nil {
 		return err
 	}
 	if _, err := tx.Stmt(b.bStmt).Exec(e.Message); err != nil {
@@ -238,14 +254,15 @@ func (b *sqliteBackend) buildQueryFromAndWhere(req *api.QueryRequest, sqlBuf *by
 	if !req.FromTimestamp.IsZero() {
 		// Truncate to the start of the minute to handle UI datepicker sending partial seconds
 		req.FromTimestamp = req.FromTimestamp.Truncate(time.Minute)
-		fmt.Fprint(sqlBuf, "AND datetime(h.ts) >= datetime(?) ")
-		*args = append(*args, req.FromTimestamp)
+		// Compare the raw column (no datetime() wrapper) so logh_idx on ts is usable.
+		fmt.Fprint(sqlBuf, "AND h.ts >= ? ")
+		*args = append(*args, formatTS(req.FromTimestamp))
 	}
 	if !req.ToTimestamp.IsZero() {
 		// Truncate to the end of the minute (start + 59.999 seconds)
 		req.ToTimestamp = req.ToTimestamp.Truncate(time.Minute).Add(time.Minute - time.Nanosecond)
-		fmt.Fprint(sqlBuf, "AND datetime(h.ts) <= datetime(?) ")
-		*args = append(*args, req.ToTimestamp)
+		fmt.Fprint(sqlBuf, "AND h.ts <= ? ")
+		*args = append(*args, formatTS(req.ToTimestamp))
 	}
 	if req.Hostname != "" {
 		fmt.Fprint(sqlBuf, "AND h.host = ? ")
@@ -271,30 +288,35 @@ func clamp(min, v, max int) int {
 	return v
 }
 
+// formatTS renders a timestamp in a fixed, lexicographically sortable UTC form so
+// that plain ">=" / "<=" / "ORDER BY" on the ts column can use logh_idx.
+func formatTS(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05.000")
+}
+
 func (b *sqliteBackend) buildQueryLimit(req *api.QueryRequest, sqlBuf *bytes.Buffer, args *[]interface{}) {
 	fmt.Fprint(sqlBuf, "LIMIT ? OFFSET ? ")
 	*args = append(*args, clamp(0, req.Limit, 256))
 	*args = append(*args, clamp(0, req.Offset, math.MaxInt16))
 }
 
-func (b *sqliteBackend) handleQueryStat(m *queryStatM) {
+func (b *sqliteBackend) doQueryStat(req *api.QueryRequest) *api.QueryStatResponse {
 
 	args := []interface{}{}
 
 	sqlBuf := &bytes.Buffer{}
 	fmt.Fprint(sqlBuf, "SELECT h.host, h.app, COUNT(b.docid) ")
-	b.buildQueryFromAndWhere(m.req, sqlBuf, &args)
+	b.buildQueryFromAndWhere(req, sqlBuf, &args)
 	fmt.Fprint(sqlBuf, "GROUP BY h.host, h.app ")
 	fmt.Fprint(sqlBuf, "ORDER BY h.host, h.app ")
-	b.buildQueryLimit(m.req, sqlBuf, &args)
+	b.buildQueryLimit(req, sqlBuf, &args)
 
 	res := api.QueryStatResponse{}
 
 	rows, err := b.db.Query(sqlBuf.String(), args...)
 	if err != nil {
 		res.Error = err.Error()
-		m.res <- &res
-		return
+		return &res
 	}
 	defer rows.Close()
 
@@ -306,8 +328,7 @@ func (b *sqliteBackend) handleQueryStat(m *queryStatM) {
 		err = rows.Scan(&app, &proc, &count)
 		if err != nil {
 			res.Error = err.Error()
-			m.res <- &res
-			return
+			return &res
 		}
 		procs, ok := stat[app]
 		if !ok {
@@ -320,42 +341,39 @@ func (b *sqliteBackend) handleQueryStat(m *queryStatM) {
 	err = rows.Err()
 	if err != nil {
 		res.Error = err.Error()
-		m.res <- &res
-		return
+		return &res
 	}
 
 	res.Stat = stat
-	m.res <- &res
+	return &res
 }
 
-func (b *sqliteBackend) handleQueryList(m *queryListM) {
+func (b *sqliteBackend) doQueryList(req *api.QueryRequest) *api.QueryListResponse {
 
 	args := []interface{}{}
 
 	sqlBuf := &bytes.Buffer{}
 	fmt.Fprint(sqlBuf, "SELECT h.ts, h.host, h.app, b.msg ")
-	b.buildQueryFromAndWhere(m.req, sqlBuf, &args)
+	b.buildQueryFromAndWhere(req, sqlBuf, &args)
 	fmt.Fprint(sqlBuf, "ORDER BY h.ts DESC ")
-	b.buildQueryLimit(m.req, sqlBuf, &args)
+	b.buildQueryLimit(req, sqlBuf, &args)
 
 	res := api.QueryListResponse{}
 
 	rows, err := b.db.Query(sqlBuf.String(), args...)
 	if err != nil {
 		res.Error = err.Error()
-		m.res <- &res
-		return
+		return &res
 	}
 	defer rows.Close()
 
-	entries := make([]*api.LogEntry, 0, clamp(0, m.req.Limit, 500))
+	entries := make([]*api.LogEntry, 0, clamp(0, req.Limit, 500))
 	for rows.Next() {
 		entry := api.LogEntry{}
 		err = rows.Scan(&entry.Timestamp, &entry.Hostname, &entry.Application, &entry.Message)
 		if err != nil {
 			res.Error = err.Error()
-			m.res <- &res
-			return
+			return &res
 		}
 		entries = append(entries, &entry)
 	}
@@ -363,12 +381,11 @@ func (b *sqliteBackend) handleQueryList(m *queryListM) {
 	err = rows.Err()
 	if err != nil {
 		res.Error = err.Error()
-		m.res <- &res
-		return
+		return &res
 	}
 
 	res.Entries = entries
-	m.res <- &res
+	return &res
 }
 
 func (b *sqliteBackend) handleRetention(now time.Time) {
@@ -406,7 +423,7 @@ func (b *sqliteBackend) handleRetentionBatch(tx *sql.Tx, upto time.Time) error {
 
 	var err error
 
-	rows, err := tx.Query("SELECT rowid FROM logh AS h WHERE h.ts < ?", upto)
+	rows, err := tx.Query("SELECT rowid FROM logh AS h WHERE h.ts < ?", formatTS(upto))
 	if err != nil {
 		return err
 	}

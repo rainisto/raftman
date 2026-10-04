@@ -19,6 +19,12 @@ func main() {
 
 	flag.Parse()
 
+	// Allow the backend to be given as a positional argument (the Docker
+	// entrypoint form `raftman <backendURL>`), in addition to the -backend flag.
+	for _, arg := range flag.Args() {
+		backendArgs = append(backendArgs, mustParseURL(arg))
+	}
+
 	if len(backendArgs) == 0 {
 		backendArgs = append(backendArgs, mustParseURL("sqlite:///var/lib/raftman/logs.db"))
 	} else if len(backendArgs) > 1 {
