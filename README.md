@@ -1,6 +1,6 @@
 # raftman
 
-![raftman](https://raw.githubusercontent.com/pierredavidbelanger/raftman/master/frontend/static/ui/logo-96.png)
+![raftman](https://raw.githubusercontent.com/pierredavidbelanger/raftman/master/internal/server/ui/logo-96.png)
 
 A syslog server with integrated full text search via a JSON API and Web UI.
 
@@ -20,7 +20,7 @@ sudo docker run --rm --name raftman \
     -p 5514:5514 \
     -p 8181:8181 \
     -p 8282:8282 \
-    pierredavidbelanger/raftman
+    rainisto/raftman
 ```
 
 
@@ -109,7 +109,7 @@ The same `retention`, `batchSize`, `insertQueueSize`, `queryQueueSize` and
 ```yaml
 services:
   raftman:
-    image: pierredavidbelanger/raftman
+    image: rainisto/raftman
     restart: unless-stopped
     # Exec/list form so the "&" in the URL is passed verbatim (not treated as a
     # shell background operator).
